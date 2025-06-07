@@ -1,8 +1,10 @@
 import streamlit as st
 import os
 from dotenv import load_dotenv
-from retriever import DocumentRetriever
-from generator import ResponseGenerator
+from src.core.retriever import DocumentRetriever
+from src.core.generator import ResponseGenerator
+from src.voice.voice_recognition import VoiceRecognition
+import time
 
 # Tải biến môi trường
 load_dotenv()
@@ -28,6 +30,34 @@ def initialize_rag():
     except Exception as e:
         st.error(f"🔴 Lỗi khởi tạo: {e}")
         st.stop()
+
+# Khởi tạo nhận dạng giọng nói
+@st.cache_resource
+def initialize_voice_recognition():
+    try:
+        # Thử nhập khẩu speech_recognition
+        import speech_recognition as sr
+        
+        # Thử khởi tạo một đối tượng Microphone để kiểm tra
+        microphone_available = True
+        try:
+            m = sr.Microphone()
+        except Exception as e:
+            print(f"Microphone không khả dụng: {e}")
+            microphone_available = False
+            
+        if microphone_available:
+            from src.voice.voice_recognition import VoiceRecognition
+            return VoiceRecognition(language="vi-VN"), True
+        else:
+            # Sử dụng phiên bản dự phòng nếu không có microphone
+            from src.voice.voice_recognition_text import VoiceRecognition
+            return VoiceRecognition(language="vi-VN"), False
+    except ImportError as e:
+        print(f"Không thể nhập khẩu speech_recognition: {e}")
+        # Sử dụng phiên bản dự phòng nếu không có thư viện speech_recognition
+        from src.voice.voice_recognition_text import VoiceRecognition
+        return VoiceRecognition(language="vi-VN"), False
 
 # Cấu hình trang
 st.set_page_config(
@@ -137,6 +167,48 @@ st.markdown(
         box-shadow: 0 2px 6px rgba(0, 0, 0, 0.1);
     }
 
+    /* Nút voice */
+    .voice-button {
+        border-radius: 50%;
+        width: 50px;
+        height: 50px;
+        background: #D4A373;
+        color: #F5F6F5;
+        font-size: 24px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        margin: 10px auto;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        border: none;
+    }
+
+    .voice-button:hover {
+        background: #E8B923;
+        transform: scale(1.05);
+    }
+
+    .voice-button.recording {
+        background: #e74c3c;
+        animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse {
+        0% {
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7);
+        }
+        70% {
+            transform: scale(1.05);
+            box-shadow: 0 0 0 10px rgba(231, 76, 60, 0);
+        }
+        100% {
+            transform: scale(1);
+            box-shadow: 0 0 0 0 rgba(231, 76, 60, 0);
+        }
+    }
+
     /* Chân trang */
     .footer {
         text-align: center;
@@ -179,6 +251,8 @@ st.markdown(
 
 # Khởi tạo thành phần
 retriever, generator = initialize_rag()
+voice_recognition, microphone_available = initialize_voice_recognition()
+
 if not retriever or not generator:
     st.error("🚨 Ứng dụng không thể khởi tạo.")
     st.stop()
@@ -235,6 +309,14 @@ with col2:
     if "chat_minimized" not in st.session_state:
         st.session_state.chat_minimized = False
 
+    # Trạng thái ghi âm
+    if "is_recording" not in st.session_state:
+        st.session_state.is_recording = False
+    
+    # Văn bản nhận dạng từ giọng nói
+    if "recognized_text" not in st.session_state:
+        st.session_state.recognized_text = ""
+
     # Nút thu gọn/mở rộng trò chuyện
     if st.session_state.chat_minimized:
         if st.button("💬 Mở Trò Chuyện", key="expand_chat", help="Mở khung trò chuyện"):
@@ -256,11 +338,15 @@ with col2:
 
 Tôi là hướng dẫn viên ảo của bạn, chuyên về các điểm tham quan nổi tiếng tại Việt Nam. Hỏi tôi về danh lam, di tích lịch sử hoặc các địa điểm văn hóa ở Hà Nội, Hội An, Huế và hơn thế nữa.
 
+Tôi cũng có thể gợi ý các tour du lịch phù hợp với nhu cầu của bạn. Hãy cho tôi biết bạn muốn đi đâu, với bao nhiêu người và ngân sách của bạn.
+
 **Gợi ý câu hỏi:**
 - Những điểm phải đến ở TP. Hồ Chí Minh?
 - Lịch sử của Phố cổ Hội An?
 - Chùa nổi tiếng nhất ở Hà Nội?
 - Điều gì làm Vịnh Hạ Long đặc biệt?
+- Gợi ý tour du lịch Đà Nẵng cho 4 người?
+- Có tour nào đến Phú Quốc với giá dưới 2 triệu không?
                     """
                 }
             ]
@@ -270,7 +356,61 @@ Tôi là hướng dẫn viên ảo của bạn, chuyên về các điểm tham q
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-        # Xử lý đầu vào người dùng
+        # Tạo container cho ghi âm giọng nói
+        voice_container = st.container()
+        
+        with voice_container:
+            col1, col2, col3 = st.columns([1, 1, 1])
+            with col2:
+                if microphone_available:
+                    # Nút ghi âm với biểu tượng microphone
+                    if st.button("🎙️", key="voice_button", help="Nhấn để ghi âm giọng nói", 
+                               use_container_width=True):
+                        
+                        with st.spinner("Đang lắng nghe..."):
+                            st.session_state.is_recording = True
+                            # Tăng timeout và thêm adjust_duration
+                            recognized_text = voice_recognition.recognize_from_microphone(timeout=8, adjust_duration=1.5)
+                            st.session_state.is_recording = False
+                            
+                            if recognized_text:
+                                st.session_state.recognized_text = recognized_text
+                                # Tự động gửi văn bản nhận dạng được làm tin nhắn
+                                st.session_state.messages.append({"role": "user", "content": recognized_text})
+                                with st.chat_message("user"):
+                                    st.markdown(recognized_text)
+                                
+                                with st.chat_message("assistant"):
+                                    with st.spinner("Đang tìm kiếm thông tin..."):
+                                        response = generator.generate_response(recognized_text)
+                                        st.markdown(response)
+                                st.session_state.messages.append({"role": "assistant", "content": response})
+                                
+                                # Reset recognized text
+                                st.session_state.recognized_text = ""
+                                # Kích hoạt rerun để cập nhật UI
+                                st.rerun()
+                            else:
+                                st.error("Không thể nhận dạng giọng nói, vui lòng thử lại.")
+                    
+                    # Hiển thị trạng thái ghi âm
+                    if st.session_state.is_recording:
+                        st.info("Đang lắng nghe...")
+                else:
+                    # Hiển thị thông báo nếu microphone không khả dụng
+                    st.warning("🎙️ Chức năng giọng nói không khả dụng. Vui lòng cài đặt SpeechRecognition và PyAudio.")
+                    st.markdown("""
+                    **Để kích hoạt tính năng voice-to-text, cần:**
+                    1. Cài đặt SpeechRecognition: `pip install SpeechRecognition`
+                    2. Cài đặt PyAudio: 
+                       - Ubuntu/Debian: `apt install portaudio19-dev python3-pyaudio`
+                       - MacOS: `brew install portaudio && pip install pyaudio`
+                       - Windows: `pip install pipwin && pipwin install pyaudio`
+                    3. Khởi động lại ứng dụng
+                    """)
+                    
+
+        # Xử lý đầu vào người dùng qua nhập văn bản
         if prompt := st.chat_input("Hỏi về một điểm tham quan ở Việt Nam..."):
             st.session_state.messages.append({"role": "user", "content": prompt})
             with st.chat_message("user"):

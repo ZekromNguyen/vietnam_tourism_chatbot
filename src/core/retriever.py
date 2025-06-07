@@ -7,6 +7,7 @@ import os
 import sys # Import sys for potential critical exits
 from langchain.schema import Document # Keep this for manual loading
 from typing import List, Optional # Add type hints for clarity
+import re  # Thêm thư viện re để sử dụng regex
 
 # --- Constants ---
 DEFAULT_DATA_DIR = "data"
@@ -94,7 +95,7 @@ class DocumentRetriever:
                         if content.strip(): # Ensure content is not just whitespace
                             doc = Document(
                                 page_content=content,
-                                metadata={"source": filename} # Use filename as source
+                                metadata={"source": file_path} # Use filename as source
                             )
                             documents.append(doc)
                             loaded_count += 1
@@ -192,10 +193,63 @@ class DocumentRetriever:
                  print("--- Search Failed ---")
                  return []
 
+        # Kiểm tra xem query có liên quan đến các thành phố không
+        city_patterns = {
+            "hcm": r'(hồ\s*chí\s*minh|sài\s*gòn|tp\s*hcm|tp\.?\s*hồ\s*chí\s*minh)',
+            "hanoi": r'(hà\s*nội|hà\s*thành)',
+            "hue": r'(huế|cố\s*đô)',
+            "danang": r'(đà\s*nẵng)',
+            "vungtau": r'(vũng\s*tàu|bà\s*rịa|bãi\s*sau|bãi\s*trước)'
+        }
+        
+        # Tìm thành phố trong query
+        city_match = None
+        for city, pattern in city_patterns.items():
+            if re.search(pattern, query.lower()):
+                city_match = city
+                print(f"🔍 Phát hiện thành phố trong truy vấn: {city}")
+                break
+                
         # Perform the search
         try:
             print(f"ℹ️ Performing similarity search in FAISS index...")
-            docs = self.vector_store.similarity_search(query, k=k)
+            
+            # Nếu có thành phố trong query, ưu tiên kết quả từ file tương ứng
+            if city_match:
+                # Tìm kiếm thông thường
+                all_docs = self.vector_store.similarity_search(query, k=k+6)  # Lấy thêm kết quả để lọc
+                
+                # Lọc kết quả theo thành phố
+                priority_docs = []
+                other_docs = []
+                
+                city_file_patterns = {
+                    "hcm": r'vietnam_hochiminh\.txt$',
+                    "hanoi": r'vietnam_hanoi\.txt$',
+                    "hue": r'vietnam_hue\.txt$',
+                    "danang": r'vietnam_danang\.txt$',
+                    "vungtau": r'vietnam_vungtau\.txt$'
+                }
+                
+                pattern = city_file_patterns[city_match]
+                print(f"🔍 Ưu tiên tìm kiếm từ file khớp với mẫu: {pattern}")
+                
+                for doc in all_docs:
+                    source = doc.metadata.get("source", "")
+                    if re.search(pattern, source, re.IGNORECASE):
+                        priority_docs.append(doc)
+                        print(f"✅ Tìm thấy tài liệu ưu tiên từ nguồn: {source}")
+                    else:
+                        other_docs.append(doc)
+                
+                # Kết hợp kết quả, ưu tiên file thành phố
+                docs = priority_docs + other_docs
+                docs = docs[:k]  # Giới hạn số lượng kết quả
+                print(f"✅ Đã ưu tiên {len(priority_docs)} tài liệu phù hợp với thành phố {city_match}")
+            else:
+                # Tìm kiếm thông thường nếu không có thành phố trong query
+                docs = self.vector_store.similarity_search(query, k=k)
+                
             print(f"✅ Found {len(docs)} relevant document chunks.")
             print("--- Search Finished ---")
             return docs
